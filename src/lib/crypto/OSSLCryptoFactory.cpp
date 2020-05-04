@@ -77,6 +77,7 @@ bool OSSLCryptoFactory::FipsSelfTestStatus = false;
 
 static unsigned nlocks;
 static Mutex** locks;
+static bool ossl_shutdown;
 
 // Mutex callback
 void lock_callback(int mode, int n, const char* file, int line)
@@ -100,6 +101,13 @@ void lock_callback(int mode, int n, const char* file, int line)
 		mtx->unlock();
 	}
 }
+
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+void ossl_factory_shutdown(void)
+{
+	ossl_shutdown = true;
+}
+#endif
 
 // Constructor
 OSSLCryptoFactory::OSSLCryptoFactory()
@@ -176,6 +184,9 @@ OSSLCryptoFactory::OSSLCryptoFactory()
 			    OPENSSL_INIT_ADD_ALL_CIPHERS |
 			    OPENSSL_INIT_ADD_ALL_DIGESTS |
 			    OPENSSL_INIT_LOAD_CONFIG, NULL);
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+	OPENSSL_atexit(ossl_factory_shutdown);
+#endif
 #endif
 
 	// Initialise the GOST engine
@@ -226,31 +237,34 @@ err:
 // Destructor
 OSSLCryptoFactory::~OSSLCryptoFactory()
 {
-#ifdef WITH_GOST
-	// Finish the GOST engine
-	if (eg != NULL)
+	if (ossl_shutdown)
 	{
-		ENGINE_finish(eg);
-		ENGINE_free(eg);
-		eg = NULL;
-	}
+#ifdef WITH_GOST
+		// Finish the GOST engine
+		if (eg != NULL)
+		{
+			ENGINE_finish(eg);
+			ENGINE_free(eg);
+			eg = NULL;
+		}
 #endif
 
-	// Finish the rd_rand engine
-	ENGINE_finish(rdrand_engine);
-	ENGINE_free(rdrand_engine);
-	rdrand_engine = NULL;
+		// Finish the rd_rand engine
+		ENGINE_finish(rdrand_engine);
+		ENGINE_free(rdrand_engine);
+		rdrand_engine = NULL;
 
+		// Recycle locks
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+		if (setLockingCallback)
+		{
+			CRYPTO_set_locking_callback(NULL);
+		}
+#endif
+	}
 	// Destroy the one-and-only RNG
 	delete rng;
 
-	// Recycle locks
-#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
-	if (setLockingCallback)
-	{
-		CRYPTO_set_locking_callback(NULL);
-	}
-#endif
 	for (unsigned i = 0; i < nlocks; i++)
 	{
 		MutexFactory::i()->recycleMutex(locks[i]);
